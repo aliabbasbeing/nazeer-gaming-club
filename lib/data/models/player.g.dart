@@ -24,13 +24,14 @@ class PlayerAdapter extends TypeAdapter<Player> {
       turnCount: fields[4] as int,
       createdAt: fields[5] as DateTime?,
       personalTarget: fields[6] as int?,
+      colorIndex: (fields[7] as int?) ?? 0,
     );
   }
 
   @override
   void write(BinaryWriter writer, Player obj) {
     writer
-      ..writeByte(7)
+      ..writeByte(8)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -44,7 +45,9 @@ class PlayerAdapter extends TypeAdapter<Player> {
       ..writeByte(5)
       ..write(obj.createdAt)
       ..writeByte(6)
-      ..write(obj.personalTarget);
+      ..write(obj.personalTarget)
+      ..writeByte(7)
+      ..write(obj.colorIndex);
   }
 
   @override

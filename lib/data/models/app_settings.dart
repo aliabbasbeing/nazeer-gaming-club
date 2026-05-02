@@ -12,7 +12,7 @@ class AppSettings extends HiveObject {
   
   @HiveField(2)
   DateTime lastModified;
-  
+
   AppSettings({
     this.isDarkMode = false,
     this.defaultTargetScore = 100,

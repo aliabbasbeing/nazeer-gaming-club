@@ -1,5 +1,6 @@
 import 'dart:math';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import '../../core/utils/name_formatter.dart';
 
 /// State enum for the Name Draw screen
 enum DrawState { empty, ready, drawing, complete }
@@ -50,7 +51,7 @@ class DrawNotifier extends StateNotifier<DrawData> {
 
   /// Add a name to the candidate list
   void addName(String name) {
-    final trimmedName = name.trim();
+    final trimmedName = normalizePlayerName(name);
     if (trimmedName.isEmpty) {
       return;
     }
@@ -130,6 +131,14 @@ class DrawNotifier extends StateNotifier<DrawData> {
 
   /// Get the drawn names in order (for passing to game)
   List<String> get drawnNamesInOrder => List<String>.from(state.drawnNames);
+
+  /// Reorder drawn players (Feature 10 — drag to reorder in draw screen)
+  void reorderDrawnPlayers(int oldIndex, int newIndex) {
+    final list = List<String>.from(state.drawnNames);
+    final moved = list.removeAt(oldIndex);
+    list.insert(newIndex, moved);
+    state = state.copyWith(drawnNames: list);
+  }
 
   /// Reset the entire draw state
   void reset() {

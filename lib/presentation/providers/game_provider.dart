@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:uuid/uuid.dart';
 import '../../data/models/game.dart';
@@ -7,18 +8,44 @@ import '../../data/models/snooker_ball.dart';
 import '../../data/repositories/storage_repository.dart';
 import '../../core/constants/app_constants.dart';
 import '../../core/transfer/game_transfer_model.dart';
+import '../../core/utils/name_formatter.dart';
 import 'settings_provider.dart';
 import 'history_provider.dart';
+import 'saved_players_provider.dart';
+import 'statistics_provider.dart';
+
+class GameCompletionEvent {
+  final String gameId;
+  final String loserName;
+
+  const GameCompletionEvent({
+    required this.gameId,
+    required this.loserName,
+  });
+}
+
+final gameCompletionEventProvider = StateProvider<GameCompletionEvent?>((ref) => null);
 
 /// Provider for current game state
 final gameProvider = StateNotifierProvider<GameNotifier, Game?>((ref) {
   final repository = ref.watch(storageRepositoryProvider);
-  return GameNotifier(
+  final notifier = GameNotifier(
     repository,
-    // After every _addHistoryAction Hive write, reload the history list so
-    // the History screen updates instantly (same microtask, no recreation).
     onHistoryChanged: () => ref.read(historyProvider.notifier).reload(),
+    onPlayerSaved: (name, colorIndex) =>
+        ref.read(savedPlayersProvider.notifier).savePlayer(name, colorIndex),
+    onGameCompleted: (game, loser) {
+      unawaited(
+        ref.read(playerStatisticsProvider.notifier).recordMatchResult(
+              playerNames: game.players.map((p) => p.name).toList(),
+              loserName: loser.name,
+            ),
+      );
+      ref.read(gameCompletionEventProvider.notifier).state =
+          GameCompletionEvent(gameId: game.id, loserName: loser.name);
+    },
   );
+  return notifier;
 });
 
 class GameNotifier extends StateNotifier<Game?> {
@@ -26,9 +53,16 @@ class GameNotifier extends StateNotifier<Game?> {
   final _uuid = const Uuid();
   final List<Game> _undoStack = []; // multi-step undo
   final void Function()? _onHistoryChanged;
+  final void Function(String name, int colorIndex)? _onPlayerSaved;
+  final void Function(Game completedGame, Player loser)? _onGameCompleted;
 
-  GameNotifier(this._repository, {void Function()? onHistoryChanged})
-      : _onHistoryChanged = onHistoryChanged,
+  GameNotifier(this._repository, {
+    void Function()? onHistoryChanged,
+    void Function(String name, int colorIndex)? onPlayerSaved,
+    void Function(Game completedGame, Player loser)? onGameCompleted,
+  })  : _onHistoryChanged = onHistoryChanged,
+        _onPlayerSaved = onPlayerSaved,
+        _onGameCompleted = onGameCompleted,
         super(null) {
     loadActiveGame();
   }
@@ -43,10 +77,11 @@ class GameNotifier extends StateNotifier<Game?> {
   
   /// Create a new game
   Future<void> createNewGame({int? targetScore}) async {
-    // Mark current game as inactive
+    // Mark current game as inactive and clear its history
     if (state != null) {
       final oldGame = state!.copyWith(isActive: false);
       await _repository.saveGame(oldGame);
+      await _repository.clearGameHistory(state!.id);
     }
     
     final newGame = Game(
@@ -79,8 +114,12 @@ class GameNotifier extends StateNotifier<Game?> {
     
     final newPlayer = Player(
       id: _uuid.v4(),
-      name: playerName.trim(),
+      name: normalizePlayerName(playerName),
+      colorIndex: currentGame.players.length % 12,
     );
+    
+    // Auto-save to saved players
+    _onPlayerSaved?.call(newPlayer.name, newPlayer.colorIndex);
     
     final updatedPlayers = [...currentGame.players, newPlayer];
     final updatedGame = currentGame.copyWith(
@@ -188,6 +227,8 @@ class GameNotifier extends StateNotifier<Game?> {
     
     final currentGame = state!;
     final currentPlayer = currentGame.currentPlayer!;
+
+    if (currentGame.completedAt != null) return;
     
     if (currentPlayer.isCompleted) {
       await nextPlayer();
@@ -195,7 +236,8 @@ class GameNotifier extends StateNotifier<Game?> {
     }
     
     final pointsToAdd = currentGame.isSubtractMode ? -ball.points : ball.points;
-    final newScore = (currentPlayer.score + pointsToAdd).clamp(-100, double.infinity).toInt();
+    final previousScore = currentPlayer.score;
+    final newScore = (previousScore + pointsToAdd).clamp(-100, double.infinity).toInt();
     final effective = currentPlayer.effectiveTarget(currentGame.targetScore);
     final isCompleted = newScore >= effective;
 
@@ -226,7 +268,9 @@ class GameNotifier extends StateNotifier<Game?> {
       playerName: currentPlayer.name,
       pointsChanged: ball.points,
       ballColor: ball.name,
-      details: '$newScore',  // running total after this action
+      details: '$previousScore → $newScore',
+      previousBalance: previousScore,
+      updatedBalance: newScore,
     );
     
     if (isCompleted) {
@@ -240,9 +284,10 @@ class GameNotifier extends StateNotifier<Game?> {
     }
     
     state = updatedGame;
-    
+    final finalised = await _finalizeGameIfNeeded(updatedGame);
+
     // Auto-switch to next player if completed
-    if (isCompleted) {
+    if (!finalised && isCompleted) {
       await nextPlayer();
     }
   }
@@ -292,6 +337,8 @@ class GameNotifier extends StateNotifier<Game?> {
     int? pointsChanged,
     String? ballColor,
     String? details,
+    int? previousBalance,
+    int? updatedBalance,
   }) async {
     final action = HistoryAction(
       id: _uuid.v4(),
@@ -302,6 +349,8 @@ class GameNotifier extends StateNotifier<Game?> {
       pointsChanged: pointsChanged,
       ballColor: ballColor,
       details: details,
+      previousBalance: previousBalance,
+      updatedBalance: updatedBalance,
     );
 
     await _repository.addHistoryAction(action);
@@ -387,6 +436,7 @@ class GameNotifier extends StateNotifier<Game?> {
     );
 
     state = updatedGame;
+    await _finalizeGameIfNeeded(updatedGame);
   }
 
   /// Set or clear per-player personal target
@@ -427,5 +477,74 @@ class GameNotifier extends StateNotifier<Game?> {
         targetPlayer.isCompleted) {
       await nextPlayer();
     }
+  }
+
+  /// Set a player's color index
+  Future<void> setPlayerColor(String playerId, int colorIndex) async {
+    if (state == null) return;
+    final updatedPlayers = state!.players
+        .map((p) => p.id == playerId ? p.copyWith(colorIndex: colorIndex) : p)
+        .toList();
+    final updated = state!.copyWith(players: updatedPlayers);
+    await _repository.saveGame(updated);
+    state = updated;
+  }
+
+  /// Reorder players (for drag-to-reorder feature)
+  Future<void> reorderPlayers(int oldIndex, int newIndex) async {
+    if (state == null) return;
+    _undoStack.add(state!.copyWith());
+    if (_undoStack.length > 20) _undoStack.removeAt(0);
+    final players = List<Player>.from(state!.players);
+    final moved = players.removeAt(oldIndex);
+    players.insert(newIndex, moved);
+    final updated = state!.copyWith(players: players);
+    await _repository.saveGame(updated);
+    state = updated;
+  }
+
+  /// Reset scores, keep players, target, colors, and personal targets
+  Future<void> rematch() async {
+    if (state == null) return;
+
+    await _repository.clearGameHistory(state!.id);
+
+    final resetPlayers = state!.players.map((p) => p.copyWith(
+          score: 0,
+          isCompleted: false,
+          turnCount: 0,
+          colorIndex: p.colorIndex,
+        )).toList();
+
+    final newGame = state!.copyWith(
+      id: _uuid.v4(),
+      players: resetPlayers,
+      currentPlayerId: resetPlayers.isNotEmpty ? resetPlayers.first.id : null,
+      createdAt: DateTime.now(),
+      isActive: true,
+      isSubtractMode: false,
+    );
+
+    await _repository.saveGame(newGame);
+    _undoStack.clear();
+    state = newGame;
+  }
+
+  Future<bool> _finalizeGameIfNeeded(Game game) async {
+    if (game.completedAt != null) return true;
+
+    final remainingPlayers = game.players.where((p) => !p.isCompleted).toList();
+    if (remainingPlayers.length != 1) return false;
+
+    final loser = remainingPlayers.first;
+    final completedGame = game.copyWith(
+      isActive: false,
+      completedAt: DateTime.now(),
+    );
+
+    await _repository.saveGame(completedGame);
+    state = completedGame;
+    _onGameCompleted?.call(completedGame, loser);
+    return true;
   }
 }

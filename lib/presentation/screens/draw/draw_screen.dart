@@ -1,8 +1,9 @@
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/name_formatter.dart';
 import '../../providers/draw_provider.dart';
+import '../../providers/saved_players_provider.dart';
 import '../../providers/settings_provider.dart';
 
 /// Provider to track tab switching for navigation after "Add to Game"
@@ -18,6 +19,22 @@ class DrawScreen extends ConsumerStatefulWidget {
 class _DrawScreenState extends ConsumerState<DrawScreen>
     with SingleTickerProviderStateMixin {
   final _nameController = TextEditingController();
+  static const List<String> _quickNames = [
+    'Ali Abbas',
+    'Ali Murtaza',
+    'Noor Hassan',
+    'Ali Khadim',
+    'Farhan',
+    'Shoban',
+    'Zaheer',
+    'Tanveer',
+    'Zeeshan',
+    'Raees',
+    'Izhar',
+    'Akhtar',
+    'Yasir',
+    'Raja',
+  ];
   late AnimationController _revealController;
   late Animation<double> _scaleAnimation;
 
@@ -46,14 +63,13 @@ class _DrawScreenState extends ConsumerState<DrawScreen>
   }
 
   void _addName() {
-    final name = _nameController.text.trim();
+    final name = normalizePlayerName(_nameController.text);
     if (name.isEmpty) return;
     ref.read(drawProvider.notifier).addName(name);
     _nameController.clear();
   }
 
   void _drawNext() {
-    HapticFeedback.lightImpact();
     ref.read(drawProvider.notifier).drawNext();
     _revealController.forward(from: 0);
   }
@@ -160,6 +176,25 @@ class _DrawScreenState extends ConsumerState<DrawScreen>
                 controller: _nameController,
                 canAdd: canAddName,
                 onAdd: _addName,
+              ),
+              const SizedBox(height: 10),
+              _QuickNameSuggestions(
+                names: _quickNames,
+                existingNames: drawData.candidateNames,
+                enabled: canAddName,
+                onSelected: (name) {
+                  _nameController.clear();
+                  ref.read(drawProvider.notifier).addName(name);
+                },
+              ),
+              _SavedPlayerSuggestions(
+                controller: _nameController,
+                existingNames: drawData.candidateNames,
+                canAdd: canAddName,
+                onSelected: (name) {
+                  _nameController.clear();
+                  if (canAddName) ref.read(drawProvider.notifier).addName(name);
+                },
               ),
               const SizedBox(height: 20),
 
@@ -299,6 +334,7 @@ class _AddNameRowState extends State<_AddNameRow> {
             ),
             child: TextField(
               controller: widget.controller,
+              textCapitalization: TextCapitalization.words,
               decoration: InputDecoration(
                 hintText: 'Enter player name...',
                 contentPadding:
@@ -746,32 +782,29 @@ class _AddToGameButtonState extends State<_AddToGameButton> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Drawn Order List
+// Drawn Order List (reorderable)
 // ─────────────────────────────────────────────────────────────────────────────
 
-class _DrawnOrderList extends StatelessWidget {
+class _DrawnOrderList extends ConsumerWidget {
   final List<String> names;
 
-  const _DrawnOrderList({
-    required this.names,
-  });
+  const _DrawnOrderList({required this.names});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final colors = AppColors.of(context);
-    return Column(
-      children: List.generate(names.length, (index) {
-        return TweenAnimationBuilder<double>(
-          tween: Tween(begin: 0.0, end: 1.0),
-          duration: const Duration(milliseconds: 300),
-          curve: Curves.easeOut,
-          builder: (context, value, child) {
-            return Transform.translate(
-              offset: Offset(0, 20 * (1 - value)),
-              child: Opacity(opacity: value, child: child),
-            );
-          },
-          child: Container(
+    return ReorderableListView(
+      buildDefaultDragHandles: false,
+      onReorder: (oldIndex, newIndex) {
+        if (newIndex > oldIndex) newIndex--;
+        ref.read(drawProvider.notifier).reorderDrawnPlayers(oldIndex, newIndex);
+      },
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      children: [
+        for (int index = 0; index < names.length; index++)
+          Container(
+            key: ValueKey('drawn_${index}_${names[index]}'),
             margin: const EdgeInsets.only(bottom: 8),
             decoration: BoxDecoration(
               color: colors.bgCard,
@@ -785,7 +818,6 @@ class _DrawnOrderList extends StatelessWidget {
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
               child: Row(
                 children: [
-                  // Position badge
                   Container(
                     width: 32,
                     height: 32,
@@ -800,7 +832,7 @@ class _DrawnOrderList extends StatelessWidget {
                     alignment: Alignment.center,
                     child: Text(
                       '#${index + 1}',
-                      style: TextStyle(
+                      style: const TextStyle(
                         fontSize: 12,
                         fontWeight: FontWeight.w700,
                         color: AppColors.warning,
@@ -808,7 +840,6 @@ class _DrawnOrderList extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 12),
-                  // Name
                   Expanded(
                     child: Text(
                       names[index],
@@ -819,12 +850,186 @@ class _DrawnOrderList extends StatelessWidget {
                       ),
                     ),
                   ),
+                  ReorderableDragStartListener(
+                    index: index,
+                    child: Padding(
+                      padding: const EdgeInsets.only(left: 8),
+                      child: Icon(Icons.drag_handle,
+                          size: 22, color: colors.textMuted),
+                    ),
+                  ),
                 ],
               ),
             ),
           ),
+      ],
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Saved Player Suggestions
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _SavedPlayerSuggestions extends ConsumerWidget {
+  final TextEditingController controller;
+  final List<String> existingNames;
+  final bool canAdd;
+  final ValueChanged<String> onSelected;
+
+  const _SavedPlayerSuggestions({
+    required this.controller,
+    required this.existingNames,
+    required this.canAdd,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!canAdd) return const SizedBox.shrink();
+    final saved = ref.watch(savedPlayersProvider);
+    if (saved.isEmpty) return const SizedBox.shrink();
+    final colors = AppColors.of(context);
+
+    return ValueListenableBuilder<TextEditingValue>(
+      valueListenable: controller,
+      builder: (context, value, _) {
+        final query = value.text.toLowerCase();
+        final filtered = saved
+            .where((p) =>
+                !existingNames
+                    .any((n) => n.toLowerCase() == p.name.toLowerCase()) &&
+                (query.isEmpty ||
+                    p.name.toLowerCase().startsWith(query)))
+            .take(8)
+            .toList();
+        if (filtered.isEmpty) return const SizedBox.shrink();
+
+        return Padding(
+          padding: const EdgeInsets.only(top: 8),
+          child: SingleChildScrollView(
+            scrollDirection: Axis.horizontal,
+            child: Row(
+              children: filtered.map((p) {
+                final pColor = AppColors.playerColors[p.colorIndex % 12];
+                return GestureDetector(
+                  onTap: () => onSelected(p.name),
+                  child: Container(
+                    margin: const EdgeInsets.only(right: 8),
+                    padding: const EdgeInsets.symmetric(
+                        horizontal: 12, vertical: 6),
+                    decoration: BoxDecoration(
+                      color: pColor.withValues(alpha: 0.1),
+                      borderRadius: BorderRadius.circular(20),
+                      border:
+                          Border.all(color: pColor.withValues(alpha: 0.4)),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Container(
+                          width: 22,
+                          height: 22,
+                          decoration: BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: pColor.withValues(alpha: 0.2),
+                            border: Border.all(color: pColor, width: 1.5),
+                          ),
+                          alignment: Alignment.center,
+                          child: Text(
+                            p.name[0].toUpperCase(),
+                            style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w800,
+                                color: pColor),
+                          ),
+                        ),
+                        const SizedBox(width: 6),
+                        Text(
+                          p.name,
+                          style: TextStyle(
+                              fontSize: 13,
+                              fontWeight: FontWeight.w600,
+                              color: colors.textPrimary),
+                        ),
+                      ],
+                    ),
+                  ),
+                );
+              }).toList(),
+            ),
+          ),
         );
-      }),
+      },
+    );
+  }
+}
+
+class _QuickNameSuggestions extends StatelessWidget {
+  final List<String> names;
+  final List<String> existingNames;
+  final bool enabled;
+  final ValueChanged<String> onSelected;
+
+  const _QuickNameSuggestions({
+    required this.names,
+    required this.existingNames,
+    required this.enabled,
+    required this.onSelected,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!enabled) return const SizedBox.shrink();
+
+    final colors = AppColors.of(context);
+    final available = names
+        .where((name) => !existingNames
+            .any((existing) => existing.toLowerCase() == name.toLowerCase()))
+        .toList();
+
+    if (available.isEmpty) return const SizedBox.shrink();
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Quick Suggestions',
+          style: TextStyle(
+            fontSize: 12,
+            fontWeight: FontWeight.w700,
+            letterSpacing: 1.1,
+            color: colors.textSecondary,
+          ),
+        ),
+        const SizedBox(height: 8),
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: available.map((name) {
+            return GestureDetector(
+              onTap: () => onSelected(name),
+              child: Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                decoration: BoxDecoration(
+                  color: colors.bgCard,
+                  borderRadius: BorderRadius.circular(18),
+                  border: Border.all(color: colors.border),
+                ),
+                child: Text(
+                  name,
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: colors.textPrimary,
+                  ),
+                ),
+              ),
+            );
+          }).toList(),
+        ),
+      ],
     );
   }
 }

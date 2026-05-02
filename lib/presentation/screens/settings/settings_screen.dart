@@ -1,8 +1,11 @@
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:share_plus/share_plus.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../core/theme/app_colors.dart';
 import '../../providers/settings_provider.dart';
+import 'statistics_screen.dart';
 
 class SettingsScreen extends ConsumerStatefulWidget {
   const SettingsScreen({super.key});
@@ -88,6 +91,27 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             ),
             const SizedBox(height: 20),
 
+            // ── Statistics ───────────────────────────────────────────────
+            const _SectionHeader(title: 'Statistics'),
+            _SettingsGroup(
+              children: [
+                _SettingsRow(
+                  icon: Icons.bar_chart,
+                  title: 'Statistics',
+                  subtitle: 'Player wins, losses and leaderboard',
+                  trailing: Icon(Icons.chevron_right,
+                      color: colors.textSecondary, size: 20),
+                  onTap: () => Navigator.push(
+                    context,
+                    MaterialPageRoute(
+                      builder: (_) => const StatisticsScreen(),
+                    ),
+                  ),
+                ),
+              ],
+            ),
+            const SizedBox(height: 20),
+
             // ── About ─────────────────────────────────────────────────────
             const _SectionHeader(title: 'About'),
             _SettingsGroup(
@@ -98,6 +122,15 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   trailing: Icon(Icons.chevron_right,
                       color: colors.textSecondary, size: 20),
                   onTap: () => _showAboutAppDialog(context),
+                ),
+                const _Divider(),
+                _SettingsRow(
+                  icon: Icons.share,
+                  title: 'Share App (APK)',
+                  subtitle: 'Share with friends',
+                  trailing: Icon(Icons.chevron_right,
+                      color: colors.textSecondary, size: 20),
+                  onTap: _shareApk,
                 ),
                 const _Divider(),
                 _SettingsRow(
@@ -131,6 +164,20 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _shareApk() async {
+    try {
+      const channel = MethodChannel('com.nazeer.snooker/apk');
+      final apkPath = await channel.invokeMethod<String>('getApkPath');
+      if (apkPath == null) return;
+      await Share.shareXFiles(
+        [XFile(apkPath)],
+        text: 'Check out ${AppConstants.appName}!',
+      );
+    } catch (_) {
+      // Silently fail on non-Android or if APK sharing unavailable
+    }
   }
 }
 

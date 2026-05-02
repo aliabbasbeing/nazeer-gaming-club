@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../core/constants/app_constants.dart';
 import '../../../core/theme/app_colors.dart';
+import '../../../core/utils/name_formatter.dart';
 import '../../../data/models/game.dart';
 import '../../../data/models/player.dart';
 import '../../../data/models/snooker_ball.dart';
@@ -21,8 +22,12 @@ class HomeScreen extends ConsumerStatefulWidget {
 
 class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _nameController = TextEditingController();
-  final GlobalKey<AnimatedListState> _listKey = GlobalKey<AnimatedListState>();
-  final List<Player> _cachedPlayers = [];
+  String? _expandedColorPickerId;
+
+  @override
+  void initState() {
+    super.initState();
+  }
 
   @override
   void dispose() {
@@ -30,42 +35,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     super.dispose();
   }
 
-  void _syncList(List<Player> newPlayers) {
-    // handle insertions
-    for (var i = 0; i < newPlayers.length; i++) {
-      if (i >= _cachedPlayers.length ||
-          _cachedPlayers[i].id != newPlayers[i].id) {
-        _cachedPlayers.insert(i, newPlayers[i]);
-        _listKey.currentState?.insertItem(i,
-            duration: const Duration(milliseconds: 300));
-        return;
-      }
-    }
-    // handle removals
-    while (_cachedPlayers.length > newPlayers.length) {
-      final idx = newPlayers.length;
-      final removed = _cachedPlayers.removeAt(idx);
-      _listKey.currentState?.removeItem(
-        idx,
-        (_, animation) => _PlayerListItem(
-          player: removed,
-          isActive: false,
-          targetScore: 150,
-          animation: animation,
-          onTap: () {},
-          onRemove: () {},
-        ),
-        duration: const Duration(milliseconds: 300),
-      );
-    }
-    // sync values in-place
-    for (var i = 0; i < newPlayers.length && i < _cachedPlayers.length; i++) {
-      _cachedPlayers[i] = newPlayers[i];
-    }
-  }
-
   Future<void> _addPlayer(Game? game) async {
-    final name = _nameController.text.trim();
+    final name = normalizePlayerName(_nameController.text);
     if (name.isEmpty) return;
     _nameController.clear();
     if (game == null) {
@@ -79,6 +50,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
   void _showNewGameDialog() {
     final colors = AppColors.of(context);
+    final game = ref.read(gameProvider);
+    if (game == null) {
+      ref.read(gameProvider.notifier).createNewGame();
+      return;
+    }
     showDialog(
       context: context,
       builder: (_) => AlertDialog(
@@ -91,6 +67,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
             onPressed: () => Navigator.pop(context),
           ),
           TextButton(
+            child: Text('Same Players', style: TextStyle(color: colors.accent)),
+            onPressed: () {
+              Navigator.pop(context);
+              ref.read(gameProvider.notifier).rematch();
+            },
+          ),
+          TextButton(
             onPressed: () {
               Navigator.pop(context);
               ref.read(gameProvider.notifier).createNewGame();
@@ -100,6 +83,31 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         ],
       ),
     );
+  }
+
+  Future<void> _showGameCompleteDialog(GameCompletionEvent event) async {
+    final colors = AppColors.of(context);
+    if (!mounted) return;
+
+    await showDialog(
+      context: context,
+      builder: (_) => AlertDialog(
+        backgroundColor: colors.bgCard,
+        title: Text('Game Complete', style: TextStyle(color: colors.textPrimary)),
+        content: Text(
+          'Loser: ${event.loserName}',
+          style: TextStyle(color: colors.textSecondary),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text('OK'),
+          ),
+        ],
+      ),
+    );
+
+    ref.read(gameCompletionEventProvider.notifier).state = null;
   }
 
   void _showRemoveDialog(String id, String name) {
@@ -150,31 +158,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     );
   }
 
-  bool _listsEqual(List<Player> a, List<Player> b) {
-    if (a.length != b.length) return false;
-    for (int i = 0; i < a.length; i++) {
-      if (a[i].id != b[i].id ||
-          a[i].score != b[i].score ||
-          a[i].isCompleted != b[i].isCompleted) {
-        return false;
-      }
-    }
-    return true;
-  }
 
   @override
   Widget build(BuildContext context) {
     final game = ref.watch(gameProvider);
     final colors = ref.watch(appColorsProvider);
 
-    // Sync animated list
-    if (game != null) {
-      final newPlayers = game.players;
-      if (!_listsEqual(newPlayers, _cachedPlayers)) {
-        WidgetsBinding.instance.addPostFrameCallback(
-            (_) { if (mounted) _syncList(List<Player>.from(newPlayers)); });
-      }
-    }
+    ref.listen<GameCompletionEvent?>(gameCompletionEventProvider, (previous, next) {
+      if (next == null || next == previous) return;
+      _showGameCompleteDialog(next);
+    });
 
     return Scaffold(
       backgroundColor: colors.bgPage,
@@ -244,40 +237,51 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 _GlobalTargetChip(game: game),
               ],
               const SizedBox(height: 20),
-              const _SectionHeader(label: 'Players'),
               const SizedBox(height: 8),
               if (game != null && game.players.isNotEmpty) ...[
-                AnimatedList(
-                  key: _listKey,
-                  initialItemCount: game.players.length,
+                _GameOverBanner(
+                  game: game,
+                  onRematch: () {
+                    ref.read(gameProvider.notifier).rematch();
+                  },
+                ),
+                ReorderableListView(
+                  buildDefaultDragHandles: false,
+                  onReorder: (oldIndex, newIndex) {
+                    if (newIndex > oldIndex) newIndex--;
+                    ref.read(gameProvider.notifier).reorderPlayers(oldIndex, newIndex);
+                  },
                   shrinkWrap: true,
                   physics: const NeverScrollableScrollPhysics(),
-                  itemBuilder: (context, index, animation) {
-                    if (index >= game.players.length) {
-                      return const SizedBox.shrink();
-                    }
-                    final player = game.players[index];
-                    return _PlayerListItem(
-                      player: player,
-                      isActive: player.id == game.currentPlayerId,
-                      targetScore: game.targetScore,
-                      animation: animation,
-                      rank: index + 1,
-                      onTap: () {
-                        if (!player.isCompleted) {
-                          ref
-                              .read(gameProvider.notifier)
-                              .setCurrentPlayer(player.id);
-                        }
-                      },
-                      onRemove: () =>
-                          _showRemoveDialog(player.id, player.name),
-                      onEditTarget: player.isCompleted
-                          ? null
-                          : () => _showPersonalTargetSheet(
-                                context, ref, player, game.targetScore),
-                    );
-                  },
+                  children: [
+                    for (int i = 0; i < game.players.length; i++)
+                      _PlayerListItem(
+                        key: ValueKey(game.players[i].id),
+                        player: game.players[i],
+                        isActive: game.players[i].id == game.currentPlayerId,
+                        targetScore: game.targetScore,
+                        rank: i + 1,
+                        expandedColorPickerId: _expandedColorPickerId,
+                        onTap: () {
+                          if (!game.players[i].isCompleted) {
+                            ref.read(gameProvider.notifier).setCurrentPlayer(game.players[i].id);
+                          }
+                        },
+                        onRemove: () => _showRemoveDialog(game.players[i].id, game.players[i].name),
+                        onEditTarget: game.players[i].isCompleted
+                            ? null
+                            : () => _showPersonalTargetSheet(context, ref, game.players[i], game.targetScore),
+                        onColorPickerToggle: () => setState(() {
+                          _expandedColorPickerId = _expandedColorPickerId == game.players[i].id
+                              ? null
+                              : game.players[i].id;
+                        }),
+                        onSetColor: (idx) {
+                          ref.read(gameProvider.notifier).setPlayerColor(game.players[i].id, idx);
+                          setState(() => _expandedColorPickerId = null);
+                        },
+                      ),
+                  ],
                 ),
               ] else ...[
                 const _EmptyPlayersHint(),
@@ -287,7 +291,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               const SizedBox(height: 8),
               _CurrentPlayerCard(game: game),
               const _GameTimerChip(),
-              if (game != null) ...[
+              if (game != null && game.completedAt == null) ...[
                 const SizedBox(height: 20),
                 const _SectionHeader(label: 'Score'),
                 const SizedBox(height: 8),
@@ -372,6 +376,7 @@ class _AddPlayerRowState extends State<_AddPlayerRow> {
         Expanded(
           child: TextField(
             controller: widget.controller,
+            textCapitalization: TextCapitalization.words,
             decoration: InputDecoration(
               hintText: 'Enter player name...',
               hintStyle: TextStyle(color: colors.textMuted, fontSize: 15),
@@ -431,66 +436,70 @@ class _AddPlayerRowState extends State<_AddPlayerRow> {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Player List Item (animated slide+fade)
+// Player List Item
 // ─────────────────────────────────────────────────────────────────────────────
 
 class _PlayerListItem extends StatelessWidget {
   final Player player;
   final bool isActive;
   final int targetScore;
-  final Animation<double> animation;
   final int rank;
   final VoidCallback onTap;
   final VoidCallback onRemove;
   final VoidCallback? onEditTarget;
+  final String? expandedColorPickerId;
+  final VoidCallback onColorPickerToggle;
+  final ValueChanged<int> onSetColor;
 
   const _PlayerListItem({
+    super.key,
     required this.player,
     required this.isActive,
     required this.targetScore,
-    required this.animation,
     this.rank = 1,
     required this.onTap,
     required this.onRemove,
     this.onEditTarget,
+    this.expandedColorPickerId,
+    required this.onColorPickerToggle,
+    required this.onSetColor,
   });
 
   @override
+  @override
   Widget build(BuildContext context) {
     final colors = AppColors.of(context);
+    final playerColor = AppColors.playerColors[player.colorIndex % 12];
     final accentColor = player.isCompleted
         ? AppColors.warning
         : isActive
-            ? AppColors.primary
+            ? playerColor
             : colors.border;
+    final isExpanded = expandedColorPickerId == player.id;
 
-    return SlideTransition(
-      position: Tween<Offset>(
-        begin: const Offset(1.0, 0.0),
-        end: Offset.zero,
-      ).animate(CurvedAnimation(parent: animation, curve: Curves.easeOut)),
-      child: FadeTransition(
-        opacity: animation,
-        child: GestureDetector(
-          onTap: onTap,
-          child: AnimatedContainer(
-            duration: const Duration(milliseconds: 200),
-            margin: const EdgeInsets.only(bottom: 10),
-            decoration: BoxDecoration(
-              color: colors.bgCard,
-              borderRadius: BorderRadius.circular(14),
-              border: Border.all(
-                color: isActive ? AppColors.primary : colors.border,
-                width: isActive ? 1.5 : 1,
-              ),
-              boxShadow: isActive
-                  ? colors.activeCardShadow(AppColors.primary)
-                  : colors.cardShadow,
-            ),
-            child: IntrinsicHeight(
+    return GestureDetector(
+      onTap: onTap,
+      onLongPress: onColorPickerToggle,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 200),
+        margin: const EdgeInsets.only(bottom: 10),
+        decoration: BoxDecoration(
+          color: colors.bgCard,
+          borderRadius: BorderRadius.circular(14),
+          border: Border.all(
+            color: isActive ? playerColor : colors.border,
+            width: isActive ? 1.5 : 1,
+          ),
+          boxShadow: isActive
+              ? colors.activeCardShadow(playerColor)
+              : colors.cardShadow,
+        ),
+        child: Column(
+          children: [
+            IntrinsicHeight(
               child: Row(
                 children: [
-                  // Left accent bar
+                  // Left accent bar (player color)
                   Container(
                     width: 4,
                     decoration: BoxDecoration(
@@ -506,20 +515,25 @@ class _PlayerListItem extends StatelessWidget {
                         horizontal: 12, vertical: 12),
                     child: Row(
                       children: [
-                        Container(
-                          width: 28,
-                          height: 28,
-                          decoration: BoxDecoration(
-                            color: colors.bgElevated,
-                            shape: BoxShape.circle,
-                          ),
-                          alignment: Alignment.center,
-                          child: Text(
-                            '$rank',
-                            style: TextStyle(
-                              fontSize: 12,
-                              fontWeight: FontWeight.w600,
-                              color: colors.textSecondary,
+                        // Player avatar (tap to open color picker)
+                        GestureDetector(
+                          onTap: onColorPickerToggle,
+                          child: Container(
+                            width: 32,
+                            height: 32,
+                            decoration: BoxDecoration(
+                              shape: BoxShape.circle,
+                              color: playerColor.withValues(alpha: 0.2),
+                              border: Border.all(color: playerColor, width: 2),
+                            ),
+                            alignment: Alignment.center,
+                            child: Text(
+                              player.name[0].toUpperCase(),
+                              style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w800,
+                                color: playerColor,
+                              ),
                             ),
                           ),
                         ),
@@ -552,7 +566,7 @@ class _PlayerListItem extends StatelessWidget {
                                   children: [
                                     Icon(Icons.tune, size: 10, color: colors.accent),
                                     Text(' ${player.personalTarget} pts',
-                                      style: TextStyle(fontSize: 10, color: colors.accent, fontWeight: FontWeight.w600)),
+                                        style: TextStyle(fontSize: 10, color: colors.accent, fontWeight: FontWeight.w600)),
                                   ],
                                 ),
                               ),
@@ -562,19 +576,11 @@ class _PlayerListItem extends StatelessWidget {
                     ),
                   ),
                   const Spacer(),
-                  Padding(
-                    padding: const EdgeInsets.only(right: 10),
-                    child: player.isCompleted
-                        ? const Row(
-                            mainAxisSize: MainAxisSize.min,
-                            children: [
-                              Icon(Icons.star,
-                                  color: AppColors.warning, size: 20),
-                              SizedBox(width: 4),
-                            ],
-                          )
-                        : null,
-                  ),
+                  if (player.isCompleted)
+                    const Padding(
+                      padding: EdgeInsets.only(right: 4),
+                      child: Icon(Icons.star, color: AppColors.warning, size: 20),
+                    ),
                   Padding(
                     padding: const EdgeInsets.only(right: 10),
                     child: Text(
@@ -591,7 +597,7 @@ class _PlayerListItem extends StatelessWidget {
                         color: player.isCompleted
                             ? AppColors.warning
                             : isActive
-                                ? AppColors.primary
+                                ? playerColor
                                 : colors.textSecondary,
                       ),
                     ),
@@ -609,15 +615,43 @@ class _PlayerListItem extends StatelessWidget {
                     GestureDetector(
                       onTap: onRemove,
                       child: Padding(
-                        padding: const EdgeInsets.only(right: 12),
+                        padding: const EdgeInsets.only(right: 6),
                         child: Icon(Icons.remove_circle_outline,
                             color: colors.danger, size: 20),
+                      ),
+                    ),
+                  // Drag handle or lock icon
+                  if (player.isCompleted)
+                    Padding(
+                      padding: const EdgeInsets.only(right: 12),
+                      child: Icon(Icons.lock_outline,
+                          size: 16, color: colors.textMuted),
+                    )
+                  else
+                    ReorderableDragStartListener(
+                      index: rank - 1,
+                      child: Padding(
+                        padding: const EdgeInsets.only(right: 12),
+                        child: Icon(Icons.drag_handle,
+                            size: 22, color: colors.textMuted),
                       ),
                     ),
                 ],
               ),
             ),
-          ),
+            // Color picker expansion
+            AnimatedCrossFade(
+              firstChild: const SizedBox(height: 0, width: double.infinity),
+              secondChild: _ColorPickerRow(
+                currentIndex: player.colorIndex,
+                onChanged: onSetColor,
+              ),
+              crossFadeState: isExpanded
+                  ? CrossFadeState.showSecond
+                  : CrossFadeState.showFirst,
+              duration: const Duration(milliseconds: 200),
+            ),
+          ],
         ),
       ),
     );
@@ -1169,7 +1203,9 @@ class _ActionButtons extends ConsumerWidget {
             icon: Icons.arrow_circle_right,
             label: 'Next Player',
             filled: true,
-            onTap: () => ref.read(gameProvider.notifier).nextPlayer(),
+            onTap: () {
+              ref.read(gameProvider.notifier).nextPlayer();
+            },
           ),
         ),
       ],
@@ -1678,6 +1714,215 @@ class _PersonalTargetSheetState extends State<_PersonalTargetSheet> {
                     ),
                     child: const Text('Set Target',
                       style: TextStyle(color: Colors.white, fontWeight: FontWeight.w700)),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }
+}
+// ─────────────────────────────────────────────────────────────────────────────
+// Color Picker Row
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _ColorPickerRow extends StatelessWidget {
+  final int currentIndex;
+  final ValueChanged<int> onChanged;
+
+  const _ColorPickerRow({required this.currentIndex, required this.onChanged});
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(12, 0, 12, 12),
+      child: SingleChildScrollView(
+        scrollDirection: Axis.horizontal,
+        child: Row(
+          children: [
+            for (int i = 0; i < AppColors.playerColors.length; i++)
+              GestureDetector(
+                onTap: () => onChanged(i),
+                child: Padding(
+                  padding: const EdgeInsets.only(right: 8),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 150),
+                    width: i == currentIndex ? 28 : 22,
+                    height: i == currentIndex ? 28 : 22,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: AppColors.playerColors[i],
+                      border: i == currentIndex
+                          ? Border.all(color: Colors.white, width: 3)
+                          : null,
+                      boxShadow: i == currentIndex
+                          ? [
+                              BoxShadow(
+                                color: AppColors.playerColors[i]
+                                    .withValues(alpha: 0.6),
+                                blurRadius: 8,
+                              )
+                            ]
+                          : null,
+                    ),
+                    child: i == currentIndex
+                        ? const Icon(Icons.check, size: 14, color: Colors.white)
+                        : null,
+                  ),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Game Over Banner
+// ─────────────────────────────────────────────────────────────────────────────
+
+class _GameOverBanner extends ConsumerWidget {
+  final Game game;
+  final VoidCallback onRematch;
+
+  const _GameOverBanner({required this.game, required this.onRematch});
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    if (!game.players.every((p) => p.isCompleted)) return const SizedBox.shrink();
+    final colors = AppColors.of(context);
+    final sorted = [...game.players]..sort((a, b) => b.score.compareTo(a.score));
+
+    return Container(
+      margin: const EdgeInsets.only(bottom: 16),
+      padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        gradient: LinearGradient(
+          colors: [
+            AppColors.primary.withValues(alpha: 0.12),
+            colors.bgElevated,
+          ],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(
+            color: AppColors.primary.withValues(alpha: 0.4), width: 1.5),
+        boxShadow: [
+          BoxShadow(
+            color: AppColors.primary.withValues(alpha: 0.15),
+            blurRadius: 20,
+            spreadRadius: 2,
+          ),
+        ],
+      ),
+      child: Column(
+        children: [
+          Row(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              const Text('🏆', style: TextStyle(fontSize: 24)),
+              const SizedBox(width: 8),
+              Text(
+                'Game Over!',
+                style: TextStyle(
+                  fontSize: 20,
+                  fontWeight: FontWeight.w800,
+                  color: colors.textPrimary,
+                  fontFamily: 'Syne',
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          ...sorted.asMap().entries.map((entry) {
+            final i = entry.key;
+            final p = entry.value;
+            final medal = i == 0
+                ? '🥇'
+                : i == 1
+                    ? '🥈'
+                    : i == 2
+                        ? '🥉'
+                        : '  ';
+            final pColor = AppColors.playerColors[p.colorIndex % 12];
+            return Padding(
+              padding: const EdgeInsets.symmetric(vertical: 4),
+              child: Row(
+                children: [
+                  Text(medal, style: const TextStyle(fontSize: 16)),
+                  const SizedBox(width: 8),
+                  Container(
+                    width: 28,
+                    height: 28,
+                    decoration: BoxDecoration(
+                      shape: BoxShape.circle,
+                      color: pColor.withValues(alpha: 0.2),
+                      border: Border.all(color: pColor, width: 2),
+                    ),
+                    alignment: Alignment.center,
+                    child: Text(
+                      p.name[0].toUpperCase(),
+                      style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w800,
+                          color: pColor),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  Expanded(
+                    child: Text(
+                      p.name,
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w600,
+                          color: colors.textPrimary),
+                    ),
+                  ),
+                  Text(
+                    '${p.score} pts',
+                    style: TextStyle(
+                        fontSize: 15,
+                        fontWeight: FontWeight.w700,
+                        color: colors.accent),
+                  ),
+                ],
+              ),
+            );
+          }),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: OutlinedButton.icon(
+                  onPressed: onRematch,
+                  icon: const Icon(Icons.replay, size: 18),
+                  label: const Text('Rematch'),
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: AppColors.primary,
+                    side: const BorderSide(color: AppColors.primary),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: () =>
+                      ref.read(gameProvider.notifier).createNewGame(),
+                  icon: const Icon(Icons.add_circle_outline, size: 18),
+                  label: const Text('New Game'),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: AppColors.primary,
+                    foregroundColor: Colors.white,
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12)),
                   ),
                 ),
               ),

@@ -54,6 +54,12 @@ class HistoryAction extends HiveObject {
   
   @HiveField(8)
   final DateTime timestamp;
+
+  @HiveField(9)
+  final int? previousBalance;
+
+  @HiveField(10)
+  final int? updatedBalance;
   
   HistoryAction({
     required this.id,
@@ -64,6 +70,8 @@ class HistoryAction extends HiveObject {
     this.pointsChanged,
     this.ballColor,
     this.details,
+    this.previousBalance,
+    this.updatedBalance,
     DateTime? timestamp,
   }) : timestamp = timestamp ?? DateTime.now();
   

@@ -3,12 +3,16 @@ import '../models/player.dart';
 import '../models/game.dart';
 import '../models/history_action.dart';
 import '../models/app_settings.dart';
+import '../models/saved_player.dart';
+import '../models/player_statistics.dart';
 
 /// Repository for managing local storage operations
 class StorageRepository {
   Box<Game>? _gamesBox;
   Box<HistoryAction>? _historyBox;
   Box<AppSettings>? _settingsBox;
+  Box<SavedPlayer>? _savedPlayersBox;
+  Box<PlayerStatistics>? _statisticsBox;
   
   /// Initialize Hive and open boxes
   Future<void> init() async {
@@ -30,11 +34,19 @@ class StorageRepository {
     if (!Hive.isAdapterRegistered(4)) {
       Hive.registerAdapter(AppSettingsAdapter());
     }
+    if (!Hive.isAdapterRegistered(5)) {
+      Hive.registerAdapter(SavedPlayerAdapter());
+    }
+    if (!Hive.isAdapterRegistered(6)) {
+      Hive.registerAdapter(PlayerStatisticsAdapter());
+    }
     
     // Open boxes
     _gamesBox = await Hive.openBox<Game>('games');
     _historyBox = await Hive.openBox<HistoryAction>('history');
     _settingsBox = await Hive.openBox<AppSettings>('settings');
+    _savedPlayersBox = await Hive.openBox<SavedPlayer>('savedPlayers');
+    _statisticsBox = await Hive.openBox<PlayerStatistics>('playerStats');
   }
   
   // ========== Game Operations ==========
@@ -89,6 +101,16 @@ class StorageRepository {
   
   Future<void> clearHistory() async {
     await _historyBox?.clear();
+  }
+
+  Future<void> clearGameHistory(String gameId) async {
+    if (_historyBox == null) return;
+    final keysToDelete = _historyBox!.keys.where(
+      (k) => (_historyBox!.get(k)?.gameId) == gameId,
+    ).toList();
+    for (final key in keysToDelete) {
+      await _historyBox!.delete(key);
+    }
   }
 
   Future<void> removeLastHistoryAction(String gameId) async {
@@ -154,6 +176,43 @@ class StorageRepository {
     final settings = getSettings();
     await saveSettings(settings.copyWith(defaultTargetScore: targetScore));
   }
+
+  // ========== Player Statistics ==========
+
+  List<PlayerStatistics> getAllPlayerStatistics() {
+    final stats = _statisticsBox?.values.toList() ?? [];
+    stats.sort((a, b) {
+      final wins = b.totalWins.compareTo(a.totalWins);
+      if (wins != 0) return wins;
+      final games = b.totalGamesPlayed.compareTo(a.totalGamesPlayed);
+      if (games != 0) return games;
+      return a.name.toLowerCase().compareTo(b.name.toLowerCase());
+    });
+    return stats;
+  }
+
+  Future<void> recordMatchResult({
+    required List<String> playerNames,
+    required String loserName,
+  }) async {
+    if (_statisticsBox == null) return;
+
+    final normalizedLoser = loserName.toLowerCase();
+    for (final rawName in playerNames) {
+      final name = rawName.trim();
+      if (name.isEmpty) continue;
+      final key = name.toLowerCase();
+      final existing = _statisticsBox!.get(key);
+      final updated = (existing ?? PlayerStatistics(name: name)).copyWith(
+        name: name,
+        totalGamesPlayed: (existing?.totalGamesPlayed ?? 0) + 1,
+        totalWins: (existing?.totalWins ?? 0) + (key == normalizedLoser ? 0 : 1),
+        totalLosses: (existing?.totalLosses ?? 0) + (key == normalizedLoser ? 1 : 0),
+        lastUpdated: DateTime.now(),
+      );
+      await _statisticsBox!.put(key, updated);
+    }
+  }
   
   // ========== Cleanup ==========
   
@@ -161,5 +220,7 @@ class StorageRepository {
     await _gamesBox?.close();
     await _historyBox?.close();
     await _settingsBox?.close();
+    await _savedPlayersBox?.close();
+    await _statisticsBox?.close();
   }
 }

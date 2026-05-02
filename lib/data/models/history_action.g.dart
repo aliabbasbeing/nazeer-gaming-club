@@ -26,13 +26,15 @@ class HistoryActionAdapter extends TypeAdapter<HistoryAction> {
       ballColor: fields[6] as String?,
       details: fields[7] as String?,
       timestamp: fields[8] as DateTime?,
+      previousBalance: fields[9] as int?,
+      updatedBalance: fields[10] as int?,
     );
   }
 
   @override
   void write(BinaryWriter writer, HistoryAction obj) {
     writer
-      ..writeByte(9)
+      ..writeByte(11)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -50,7 +52,11 @@ class HistoryActionAdapter extends TypeAdapter<HistoryAction> {
       ..writeByte(7)
       ..write(obj.details)
       ..writeByte(8)
-      ..write(obj.timestamp);
+        ..write(obj.timestamp)
+        ..writeByte(9)
+        ..write(obj.previousBalance)
+        ..writeByte(10)
+        ..write(obj.updatedBalance);
   }
 
   @override
