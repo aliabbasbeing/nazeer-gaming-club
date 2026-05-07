@@ -6,6 +6,7 @@ on:
 jobs:
   build-ios:
     runs-on: macos-latest
+
     steps:
       - name: Checkout code
         uses: actions/checkout@v3
@@ -13,24 +14,21 @@ jobs:
       - name: Setup Flutter
         uses: subosito/flutter-action@v2
         with:
-          channel: 'stable'
+          channel: stable
 
       - name: Install dependencies
         run: flutter pub get
 
-      - name: Build iOS (no signing)
+      - name: Install CocoaPods
         run: |
-          flutter build ios --release --no-codesign
+          cd ios
+          pod install
 
-      - name: Create IPA
-        run: |
-          mkdir -p Payload
-          cp -r build/ios/iphoneos/Runner.app Payload/
-          zip -r app.ipa Payload
+      - name: Build IPA
+        run: flutter build ipa --release --no-codesign
 
-      - name: Create Release
-        uses: ncipollo/release-action@v1
+      - name: Upload IPA
+        uses: actions/upload-artifact@v4
         with:
-          artifacts: "app.ipa"
-          tag: "v1.0.${{ github.run_number }}"
-          token: ${{ secrets.GITHUB_TOKEN }}
+          name: ios-ipa
+          path: build/ios/ipa/*.ipa
